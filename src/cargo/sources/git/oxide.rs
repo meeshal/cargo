@@ -302,6 +302,7 @@ pub fn cargo_config_to_gitoxide_overrides(gctx: &GlobalContext) -> CargoResult<V
     }?);
     if let Some(ssl_version) = &http.ssl_version {
         use crate::util::context::SslVersionConfig;
+        println!("Setting ssl_version");
         match ssl_version {
             SslVersionConfig::Single(version) => {
                 values.push(Http::SSL_VERSION.validated_assignment_fmt(&version)?);

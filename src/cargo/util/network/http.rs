@@ -1,5 +1,6 @@
 //! Configures libcurl's http handles.
 
+use std::fs;
 use std::str;
 use std::time::Duration;
 
@@ -56,6 +57,32 @@ pub fn configure_http_handle(gctx: &GlobalContext, handle: &mut Easy) -> CargoRe
     let http = gctx.http_config()?;
     if let Some(proxy) = super::proxy::http_proxy(http) {
         handle.proxy(&proxy)?;
+    }
+    if let Some(ssl_cert) = &http.ssl_cert {
+        let ssl_cert = ssl_cert.resolve_path(gctx);
+        handle.ssl_cert(&ssl_cert)?;
+        // handle.ssl_cert_type("P12")?;
+        // handle.ssl_cert_type("PEM")?;
+        // handle.ssl_verify_host(false)?;
+        // handle.ssl_verify_peer(false)?;
+    }
+    if http.ssl_insecure.unwrap_or(false) {
+        handle.ssl_verify_host(false)?;
+        handle.ssl_verify_peer(false)?;
+    }
+    if let Some(ssl_cert_type) = &http.ssl_cert_type {
+        handle.ssl_cert_type(ssl_cert_type)?;
+    }
+    if let Some(ssl_key) = &http.ssl_key {
+        let ssl_key = ssl_key.resolve_path(gctx);
+        handle.ssl_key(&ssl_key)?;
+    }
+    if let Some(key_password_path) = &http.key_password_path {
+        let key_password_path = key_password_path.resolve_path(gctx);
+        if key_password_path.exists() {
+            let passwd = fs::read_to_string(&key_password_path)?;
+            handle.key_password(passwd.trim())?;
+        }
     }
     if let Some(cainfo) = &http.cainfo {
         let cainfo = cainfo.resolve_path(gctx);

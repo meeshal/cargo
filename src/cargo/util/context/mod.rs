@@ -2637,6 +2637,11 @@ pub struct CargoHttpConfig {
     pub debug: Option<bool>,
     pub multiplexing: Option<bool>,
     pub ssl_version: Option<SslVersionConfig>,
+    pub ssl_cert: Option<ConfigRelativePath>,
+    pub ssl_key: Option<ConfigRelativePath>,
+    pub key_password_path: Option<ConfigRelativePath>,
+    pub ssl_cert_type: Option<String>,
+    pub ssl_insecure: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
