@@ -11,6 +11,7 @@ use curl::easy::SslOpt;
 use curl::easy::SslVersion;
 use tracing::debug;
 use tracing::trace;
+use tracing::warn;
 
 use crate::util::context::SslVersionConfig;
 use crate::util::context::SslVersionConfigRange;
@@ -59,12 +60,11 @@ pub fn configure_http_handle(gctx: &GlobalContext, handle: &mut Easy) -> CargoRe
         handle.proxy(&proxy)?;
     }
     if let Some(ssl_cert) = &http.ssl_cert {
+        #[cfg(not(target_os = "macos"))]
         let ssl_cert = ssl_cert.resolve_path(gctx);
-        handle.ssl_cert(&ssl_cert)?;
-        // handle.ssl_cert_type("P12")?;
-        // handle.ssl_cert_type("PEM")?;
-        // handle.ssl_verify_host(false)?;
-        // handle.ssl_verify_peer(false)?;
+        #[cfg(target_os = "macos")]
+        warn!("`ssl_cert` is taken from the system keychain on macOS. Make sure that the {ssl_cert} is installed there.");
+        handle.ssl_cert(ssl_cert)?;
     }
     if http.ssl_insecure.unwrap_or(false) {
         handle.ssl_verify_host(false)?;
@@ -73,6 +73,7 @@ pub fn configure_http_handle(gctx: &GlobalContext, handle: &mut Easy) -> CargoRe
     if let Some(ssl_cert_type) = &http.ssl_cert_type {
         handle.ssl_cert_type(ssl_cert_type)?;
     }
+    #[cfg(not(target_os = "macos"))]
     if let Some(ssl_key) = &http.ssl_key {
         let ssl_key = ssl_key.resolve_path(gctx);
         handle.ssl_key(&ssl_key)?;

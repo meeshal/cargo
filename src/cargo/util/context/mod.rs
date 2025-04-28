@@ -2637,7 +2637,11 @@ pub struct CargoHttpConfig {
     pub debug: Option<bool>,
     pub multiplexing: Option<bool>,
     pub ssl_version: Option<SslVersionConfig>,
+    #[cfg(not(target_os = "macos"))]
     pub ssl_cert: Option<ConfigRelativePath>,
+    #[cfg(target_os = "macos")]
+    pub ssl_cert: Option<String>,
+    #[cfg(not(target_os = "macos"))]
     pub ssl_key: Option<ConfigRelativePath>,
     pub key_password_path: Option<ConfigRelativePath>,
     pub ssl_cert_type: Option<String>,
