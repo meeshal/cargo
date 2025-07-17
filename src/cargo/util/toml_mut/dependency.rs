@@ -10,12 +10,12 @@ use itertools::Itertools;
 use toml_edit::KeyMut;
 
 use super::manifest::str_or_1_len_table;
+use crate::CargoResult;
+use crate::GlobalContext;
 use crate::core::SourceId;
 use crate::core::Summary;
 use crate::core::{Features, GitReference};
 use crate::util::toml::lookup_path_base;
-use crate::CargoResult;
-use crate::GlobalContext;
 
 /// A dependency handled by Cargo.
 ///
@@ -343,7 +343,9 @@ impl Dependency {
 
             let default_features = table.get("default-features").and_then(|v| v.as_bool());
             if table.contains_key("default_features") {
-                anyhow::bail!("Use of `default_features` in `{key}` is unsupported, please switch to `default-features`");
+                anyhow::bail!(
+                    "Use of `default_features` in `{key}` is unsupported, please switch to `default-features`"
+                );
             }
 
             let features = if let Some(value) = table.get("features") {
@@ -1269,7 +1271,7 @@ mod tests {
             .unwrap();
             let dep = dep.set_source(WorkspaceSource::new());
             local
-                .insert_into_table(&vec![], &dep, &gctx, &crate_root, &Features::default())
+                .insert_into_table(&[], &dep, &gctx, &crate_root, &Features::default())
                 .unwrap();
             assert_eq!(local.data.to_string(), "dep.workspace = true\n");
         }

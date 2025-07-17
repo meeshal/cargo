@@ -3,11 +3,11 @@ use crate::command_prelude::*;
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::format_err;
+use cargo::CargoResult;
 use cargo::core::{GitReference, SourceId, Workspace};
 use cargo::ops;
 use cargo::util::IntoUrl;
 use cargo::util::VersionExt;
-use cargo::CargoResult;
 use cargo_util_schemas::manifest::PackageName;
 use itertools::Itertools;
 use semver::VersionReq;
@@ -216,7 +216,7 @@ pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
 
     let mut compile_opts = args.compile_options(
         gctx,
-        CompileMode::Build,
+        UserIntent::Build,
         workspace.as_ref(),
         ProfileChecking::Custom,
     )?;

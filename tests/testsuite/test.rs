@@ -2,14 +2,15 @@
 
 use std::fs;
 
-use cargo_test_support::prelude::*;
+use crate::prelude::*;
+use crate::utils::cargo_exe;
 use cargo_test_support::registry::Package;
-use cargo_test_support::{
-    basic_bin_manifest, basic_lib_manifest, basic_manifest, cargo_exe, project, str,
-};
+use cargo_test_support::{basic_bin_manifest, basic_lib_manifest, basic_manifest, project, str};
 use cargo_test_support::{cross_compile, paths};
 use cargo_test_support::{rustc_host, rustc_host_env, sleep_ms};
 use cargo_util::paths::dylib_path_envvar;
+
+use crate::utils::cross_compile::can_run_on_host as cross_compile_can_run_on_host;
 
 #[cargo_test]
 fn cargo_test_simple() {
@@ -1831,6 +1832,9 @@ fn test_run_implicit_example_target() {
                 [[example]]
                 name = "myexm2"
                 test = true
+
+                [profile.test]
+                panic = "abort" # this should be ignored by default Cargo targets set.
             "#,
         )
         .file(
@@ -1852,11 +1856,13 @@ fn test_run_implicit_example_target() {
         )
         .build();
 
-    // Compiles myexm1 as normal, but does not run it.
+    // Compiles myexm1 as normal binary (without --test), but does not run it.
     prj.cargo("test -v")
         .with_stderr_contains("[RUNNING] `rustc [..]myexm1.rs [..]--crate-type bin[..]")
         .with_stderr_contains("[RUNNING] `rustc [..]myexm2.rs [..]--test[..]")
         .with_stderr_does_not_contain("[RUNNING] [..]myexm1-[..]")
+        // profile.test panic settings shouldn't be applied even to myexm1
+        .with_stderr_line_without(&["[RUNNING] `rustc --crate-name myexm1"], &["panic=abort"])
         .with_stderr_contains("[RUNNING] [..]target/debug/examples/myexm2-[..]")
         .run();
 
@@ -3905,7 +3911,7 @@ test env_test ... ok
         .run();
 
     // Check that `cargo test` propagates the environment's $CARGO
-    let cargo_exe = cargo_test_support::cargo_exe();
+    let cargo_exe = cargo_exe();
     let other_cargo_path = p.root().join(cargo_exe.file_name().unwrap());
     std::fs::hard_link(&cargo_exe, &other_cargo_path).unwrap();
     let stderr_other_cargo = format!(
@@ -4736,9 +4742,9 @@ fn test_dep_with_dev() {
         .run();
 }
 
-#[cargo_test(nightly, reason = "-Zdoctest-xcompile is unstable")]
+#[cargo_test]
 fn cargo_test_doctest_xcompile_ignores() {
-    // Test for `ignore-...` syntax with -Zdoctest-xcompile.
+    // Check ignore-TARGET syntax.
     let p = project()
         .file("Cargo.toml", &basic_lib_manifest("foo"))
         .file(
@@ -4771,75 +4777,11 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 ...
 "#]])
         .run();
-
-    // Should be the same with or without -Zdoctest-xcompile because `ignore-`
-    // syntax is always enabled.
-    #[cfg(not(target_arch = "x86_64"))]
-    p.cargo("test -Zdoctest-xcompile")
-        .masquerade_as_nightly_cargo(&["doctest-xcompile"])
-        .with_stdout_data(str![[r#"
-...
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [ELAPSED]s
-...
-"#]])
-        .run();
-
-    #[cfg(target_arch = "x86_64")]
-    p.cargo("test -Zdoctest-xcompile")
-        .masquerade_as_nightly_cargo(&["doctest-xcompile"])
-        .with_stdout_data(str![[r#"
-...
-test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in [ELAPSED]s
-...
-"#]])
-        .run();
 }
 
-#[cargo_test(nightly, reason = "-Zdoctest-xcompile is unstable")]
-fn cargo_test_doctest_xcompile() {
-    if !cross_compile::can_run_on_host() {
-        return;
-    }
-    let p = project()
-        .file("Cargo.toml", &basic_lib_manifest("foo"))
-        .file(
-            "src/lib.rs",
-            r#"
-
-            ///```
-            ///assert!(1 == 1);
-            ///```
-            pub fn foo() -> u8 {
-                4
-            }
-            "#,
-        )
-        .build();
-
-    p.cargo("build").run();
-    p.cargo(&format!("test --target {}", cross_compile::alternate()))
-        .with_stdout_data(str![[r#"
-...
-running 0 tests
-...
-"#]])
-        .run();
-    p.cargo(&format!(
-        "test --target {} -Zdoctest-xcompile",
-        cross_compile::alternate()
-    ))
-    .masquerade_as_nightly_cargo(&["doctest-xcompile"])
-    .with_stdout_data(str![[r#"
-...
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [ELAPSED]s
-...
-"#]])
-    .run();
-}
-
-#[cargo_test(nightly, reason = "-Zdoctest-xcompile is unstable")]
+#[cargo_test]
 fn cargo_test_doctest_xcompile_runner() {
-    if !cross_compile::can_run_on_host() {
+    if !cross_compile_can_run_on_host() {
         return;
     }
 
@@ -4906,27 +4848,23 @@ running 0 tests
 ...
 "#]])
         .run();
-    p.cargo(&format!(
-        "test --target {} -Zdoctest-xcompile",
-        cross_compile::alternate()
-    ))
-    .masquerade_as_nightly_cargo(&["doctest-xcompile"])
-    .with_stdout_data(str![[r#"
+    p.cargo(&format!("test --target {}", cross_compile::alternate()))
+        .with_stdout_data(str![[r#"
 ...
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [ELAPSED]s
 ...
 "#]])
-    .with_stderr_data(str![[r#"
+        .with_stderr_data(str![[r#"
 ...
 this is a runner
 ...
 "#]])
-    .run();
+        .run();
 }
 
-#[cargo_test(nightly, reason = "-Zdoctest-xcompile is unstable")]
+#[cargo_test]
 fn cargo_test_doctest_xcompile_no_runner() {
-    if !cross_compile::can_run_on_host() {
+    if !cross_compile_can_run_on_host() {
         return;
     }
 
@@ -4956,17 +4894,13 @@ running 0 tests
 ...
 "#]])
         .run();
-    p.cargo(&format!(
-        "test --target {} -Zdoctest-xcompile",
-        cross_compile::alternate()
-    ))
-    .masquerade_as_nightly_cargo(&["doctest-xcompile"])
-    .with_stdout_data(str![[r#"
+    p.cargo(&format!("test --target {}", cross_compile::alternate()))
+        .with_stdout_data(str![[r#"
 ...
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [ELAPSED]s
 ...
 "#]])
-    .run();
+        .run();
 }
 
 #[cargo_test(nightly, reason = "-Zpanic-abort-tests in rustc is unstable")]

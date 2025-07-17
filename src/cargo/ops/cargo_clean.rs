@@ -2,10 +2,10 @@ use crate::core::compiler::{CompileKind, CompileMode, Layout, RustcTargetData};
 use crate::core::profiles::Profiles;
 use crate::core::{PackageIdSpec, PackageIdSpecQuery, TargetKind, Workspace};
 use crate::ops;
+use crate::util::HumanBytes;
 use crate::util::edit_distance;
 use crate::util::errors::CargoResult;
 use crate::util::interning::InternedString;
-use crate::util::HumanBytes;
 use crate::util::{GlobalContext, Progress, ProgressStyle};
 use anyhow::bail;
 use cargo_util::paths;
@@ -230,7 +230,7 @@ fn clean_specs(
 
                     let (file_types, _unsupported) = target_data
                         .info(*compile_kind)
-                        .rustc_outputs(mode, target.kind(), triple)?;
+                        .rustc_outputs(mode, target.kind(), triple, clean_ctx.gctx)?;
                     let (dir, uplift_dir) = match target.kind() {
                         TargetKind::ExampleBin | TargetKind::ExampleLib(..) => {
                             (layout.build_examples(), Some(layout.examples()))

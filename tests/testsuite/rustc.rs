@@ -1,6 +1,6 @@
 //! Tests for the `cargo rustc` command.
 
-use cargo_test_support::prelude::*;
+use crate::prelude::*;
 use cargo_test_support::{basic_bin_manifest, basic_lib_manifest, basic_manifest, project, str};
 
 #[cargo_test]
@@ -529,6 +529,29 @@ fn fail_with_multiple_packages() {
         .with_stderr_data(str![[r#"
 [ERROR] the argument '--package [<SPEC>]' cannot be used multiple times
 ...
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn fail_with_bad_bin_no_package() {
+    let p = project()
+        .file(
+            "src/main.rs",
+            r#"
+                fn main() { println!("hello a.rs"); }
+            "#,
+        )
+        .build();
+
+    p.cargo("rustc --bin main")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] no bin target named `main`
+[HELP] available bin targets:
+    foo
+...
+
 "#]])
         .run();
 }

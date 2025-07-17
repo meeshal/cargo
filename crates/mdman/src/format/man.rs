@@ -1,8 +1,8 @@
 //! Man-page formatter.
 
-use crate::util::{header_text, parse_name_and_section};
 use crate::EventIter;
-use anyhow::{bail, Error};
+use crate::util::{header_text, parse_name_and_section};
+use anyhow::{Error, bail};
 use pulldown_cmark::{Alignment, Event, HeadingLevel, LinkType, Tag, TagEnd};
 use std::fmt::Write;
 use url::Url;
@@ -427,6 +427,7 @@ impl<'e> ManRenderer<'e> {
     }
 }
 
+#[allow(clippy::collapsible_str_replace)]
 fn escape(s: &str) -> Result<String, Error> {
     // Note: Possible source on output escape sequences: https://man7.org/linux/man-pages/man7/groff_char.7.html.
     //       Otherwise, use generic escaping in the form `\[u1EE7]` or `\[u1F994]`.

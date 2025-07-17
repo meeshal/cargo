@@ -1,20 +1,20 @@
+use crate::core::Registry as _;
 use crate::core::dependency::Dependency;
 use crate::core::registry::PackageRegistry;
 use crate::core::resolver::features::{CliFeatures, HasDevUnits};
 use crate::core::shell::Verbosity;
-use crate::core::Registry as _;
 use crate::core::{PackageId, PackageIdSpec, PackageIdSpecQuery};
 use crate::core::{Resolve, SourceId, Workspace};
 use crate::ops;
-use crate::sources::source::QueryKind;
 use crate::sources::IndexSummary;
+use crate::sources::source::QueryKind;
 use crate::util::cache_lock::CacheLockMode;
 use crate::util::context::GlobalContext;
 use crate::util::toml_mut::dependency::{MaybeWorkspace, Source};
 use crate::util::toml_mut::manifest::LocalManifest;
 use crate::util::toml_mut::upgrade::upgrade_requirement;
-use crate::util::{style, OptVersionReq};
 use crate::util::{CargoResult, VersionExt};
+use crate::util::{OptVersionReq, style};
 use anyhow::Context as _;
 use cargo_util_schemas::core::PartialVersion;
 use indexmap::IndexMap;
@@ -136,22 +136,19 @@ pub fn update_lockfile(ws: &Workspace<'_>, opts: &UpdateOptions<'_>) -> CargoRes
         // Mirror `--workspace` and never avoid workspace members.
         // Filtering them out here so the above processes them normally
         // so their dependencies can be updated as requested
-        to_avoid = to_avoid
-            .into_iter()
-            .filter(|id| {
-                for package in ws.members() {
-                    let member_id = package.package_id();
-                    // Skip checking the `version` because `previous_resolve` might have a stale
-                    // value.
-                    // When dealing with workspace members, the other fields should be a
-                    // sufficiently unique match.
-                    if id.name() == member_id.name() && id.source_id() == member_id.source_id() {
-                        return false;
-                    }
+        to_avoid.retain(|id| {
+            for package in ws.members() {
+                let member_id = package.package_id();
+                // Skip checking the `version` because `previous_resolve` might have a stale
+                // value.
+                // When dealing with workspace members, the other fields should be a
+                // sufficiently unique match.
+                if id.name() == member_id.name() && id.source_id() == member_id.source_id() {
+                    return false;
                 }
-                true
-            })
-            .collect();
+            }
+            true
+        });
 
         registry.add_sources(sources)?;
     }
@@ -463,8 +460,7 @@ pub fn write_manifest_upgrades(
                 let [comparator] = &new_req.comparators[..] else {
                     trace!(
                         "skipping dependency `{}` with multiple version comparators: {:?}",
-                        name,
-                        new_req.comparators
+                        name, new_req.comparators
                     );
                     continue;
                 };

@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use cargo_util_schemas::manifest::RustVersion;
+use cargo_util_schemas::manifest::{Hints, RustVersion};
 use curl::easy::Easy;
 use curl::multi::{EasyHandle, Multi};
 use lazycell::LazyCell;
@@ -27,15 +27,15 @@ use crate::core::{
 };
 use crate::core::{Summary, Workspace};
 use crate::sources::source::{MaybePackage, SourceMap};
+use crate::util::HumanBytes;
 use crate::util::cache_lock::{CacheLock, CacheLockMode};
 use crate::util::errors::{CargoResult, HttpNotSuccessful};
 use crate::util::interning::InternedString;
-use crate::util::network::http::http_handle_and_timeout;
 use crate::util::network::http::HttpTimeout;
+use crate::util::network::http::http_handle_and_timeout;
 use crate::util::network::retry::{Retry, RetryResult};
 use crate::util::network::sleep::SleepTracker;
-use crate::util::HumanBytes;
-use crate::util::{self, internal, GlobalContext, Progress, ProgressStyle};
+use crate::util::{self, GlobalContext, Progress, ProgressStyle, internal};
 
 /// Information about a package that is available somewhere in the file system.
 ///
@@ -95,6 +95,8 @@ pub struct SerializedPackage {
     metabuild: Option<Vec<String>>,
     default_run: Option<String>,
     rust_version: Option<RustVersion>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hints: Option<Hints>,
 }
 
 impl Package {
@@ -172,6 +174,11 @@ impl Package {
         self.manifest().rust_version()
     }
 
+    /// Gets the package's hints.
+    pub fn hints(&self) -> Option<&Hints> {
+        self.manifest().hints()
+    }
+
     /// Returns `true` if the package uses a custom build script for any target.
     pub fn has_custom_build(&self) -> bool {
         self.targets().iter().any(|t| t.is_custom_build())
@@ -208,14 +215,7 @@ impl Package {
         let crate_features = summary
             .features()
             .iter()
-            .map(|(k, v)| {
-                (
-                    *k,
-                    v.iter()
-                        .map(|fv| InternedString::new(&fv.to_string()))
-                        .collect(),
-                )
-            })
+            .map(|(k, v)| (*k, v.iter().map(|fv| fv.to_string().into()).collect()))
             .collect();
 
         SerializedPackage {
@@ -248,6 +248,7 @@ impl Package {
             publish: self.publish().as_ref().cloned(),
             default_run: self.manifest().default_run().map(|s| s.to_owned()),
             rust_version: self.rust_version().cloned(),
+            hints: self.hints().cloned(),
         }
     }
 }
@@ -443,7 +444,7 @@ impl<'gctx> PackageSet<'gctx> {
             ))),
             downloads_finished: 0,
             downloaded_bytes: 0,
-            largest: (0, InternedString::new("")),
+            largest: (0, "".into()),
             success: false,
             updated_at: Cell::new(Instant::now()),
             timeout,
@@ -888,7 +889,7 @@ impl<'a, 'gctx> Downloads<'a, 'gctx> {
             match ret {
                 RetryResult::Success(data) => break (dl, data),
                 RetryResult::Err(e) => {
-                    return Err(e.context(format!("failed to download from `{}`", dl.url)))
+                    return Err(e.context(format!("failed to download from `{}`", dl.url)));
                 }
                 RetryResult::Retry(sleep) => {
                     debug!(target: "network", "download retry {} for {sleep}ms", dl.url);
@@ -1182,7 +1183,7 @@ mod tls {
 
     use super::Downloads;
 
-    thread_local!(static PTR: Cell<usize> = Cell::new(0));
+    thread_local!(static PTR: Cell<usize> = const { Cell::new(0) });
 
     pub(crate) fn with<R>(f: impl FnOnce(Option<&Downloads<'_, '_>>) -> R) -> R {
         let ptr = PTR.with(|p| p.get());

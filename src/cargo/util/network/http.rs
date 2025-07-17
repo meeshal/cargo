@@ -13,11 +13,11 @@ use tracing::debug;
 use tracing::trace;
 use tracing::warn;
 
+use crate::CargoResult;
+use crate::GlobalContext;
 use crate::util::context::SslVersionConfig;
 use crate::util::context::SslVersionConfigRange;
 use crate::version;
-use crate::CargoResult;
-use crate::GlobalContext;
 
 /// Creates a new HTTP handle with appropriate global configuration for cargo.
 pub fn http_handle(gctx: &GlobalContext) -> CargoResult<Easy> {
@@ -88,6 +88,11 @@ pub fn configure_http_handle(gctx: &GlobalContext, handle: &mut Easy) -> CargoRe
     if let Some(cainfo) = &http.cainfo {
         let cainfo = cainfo.resolve_path(gctx);
         handle.cainfo(&cainfo)?;
+    }
+    // Use `proxy_cainfo` if explicitly set; otherwise, fall back to `cainfo` as curl does #15376.
+    if let Some(proxy_cainfo) = http.proxy_cainfo.as_ref().or(http.cainfo.as_ref()) {
+        let proxy_cainfo = proxy_cainfo.resolve_path(gctx);
+        handle.proxy_cainfo(&format!("{}", proxy_cainfo.display()))?;
     }
     if let Some(check) = http.check_revoke {
         handle.ssl_options(SslOpt::new().no_revoke(!check))?;

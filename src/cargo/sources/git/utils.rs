@@ -5,15 +5,15 @@ use crate::core::{GitReference, Verbosity};
 use crate::sources::git::fetch::RemoteKind;
 use crate::sources::git::oxide;
 use crate::sources::git::oxide::cargo_config_to_gitoxide_overrides;
-use crate::util::errors::CargoResult;
 use crate::util::HumanBytes;
-use crate::util::{network, GlobalContext, IntoUrl, MetricsCounter, Progress};
-use anyhow::{anyhow, Context as _};
-use cargo_util::{paths, ProcessBuilder};
+use crate::util::errors::CargoResult;
+use crate::util::{GlobalContext, IntoUrl, MetricsCounter, Progress, network};
+use anyhow::{Context as _, anyhow};
+use cargo_util::{ProcessBuilder, paths};
 use curl::easy::List;
 use git2::{ErrorClass, ObjectType, Oid};
-use serde::ser;
 use serde::Serialize;
+use serde::ser;
 use std::borrow::Cow;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -1126,7 +1126,7 @@ fn fetch_with_gitoxide(
     let config_overrides = cargo_config_to_gitoxide_overrides(gctx)?;
     let repo_reinitialized = AtomicBool::default();
     let res = oxide::with_retry_and_progress(
-        &git2_repo.path().to_owned(),
+        git2_repo.path(),
         gctx,
         &|repo_path,
           should_interrupt,

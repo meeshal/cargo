@@ -6,26 +6,26 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::str::{self, FromStr};
 
-use crate::core::summary::MissingDependencyError;
 use crate::AlreadyPrintedError;
-use anyhow::{anyhow, bail, Context as _};
+use crate::core::summary::MissingDependencyError;
+use anyhow::{Context as _, anyhow, bail};
 use cargo_platform::Platform;
 use cargo_util::paths;
 use cargo_util_schemas::manifest::{
     self, PackageName, PathBaseName, TomlDependency, TomlDetailedDependency, TomlManifest,
+    TomlPackageBuild, TomlWorkspace,
 };
 use cargo_util_schemas::manifest::{RustVersion, StringOrBool};
 use itertools::Itertools;
 use lazycell::LazyCell;
 use pathdiff::diff_paths;
-use toml_edit::ImDocument;
 use url::Url;
 
 use crate::core::compiler::{CompileKind, CompileTarget};
 use crate::core::dependency::{Artifact, ArtifactTarget, DepKind};
 use crate::core::manifest::{ManifestMetadata, TargetSourcePath};
 use crate::core::resolver::ResolveBehavior;
-use crate::core::{find_workspace_root, resolve_relative_path, CliUnstable, FeatureValue};
+use crate::core::{CliUnstable, FeatureValue, find_workspace_root, resolve_relative_path};
 use crate::core::{Dependency, Manifest, Package, PackageId, Summary, Target};
 use crate::core::{Edition, EitherManifest, Feature, Features, VirtualManifest, Workspace};
 use crate::core::{GitReference, PackageIdSpec, SourceId, WorkspaceConfig, WorkspaceRootConfig};
@@ -33,7 +33,7 @@ use crate::sources::{CRATES_IO_INDEX, CRATES_IO_REGISTRY};
 use crate::util::errors::{CargoResult, ManifestError};
 use crate::util::interning::InternedString;
 use crate::util::lints::{get_span, rel_cwd_manifest_path};
-use crate::util::{self, context::ConfigRelativePath, GlobalContext, IntoUrl, OptVersionReq};
+use crate::util::{self, GlobalContext, IntoUrl, OptVersionReq, context::ConfigRelativePath};
 
 mod embedded;
 mod targets;
@@ -80,7 +80,8 @@ pub fn read_manifest(
         let empty = Vec::new();
         let cargo_features = original_toml.cargo_features.as_ref().unwrap_or(&empty);
         let features = Features::new(cargo_features, gctx, &mut warnings, source_id.is_path())?;
-        let workspace_config = to_workspace_config(&original_toml, path, gctx, &mut warnings)?;
+        let workspace_config =
+            to_workspace_config(&original_toml, path, is_embedded, gctx, &mut warnings)?;
         if let WorkspaceConfig::Root(ws_root_config) = &workspace_config {
             let package_root = path.parent().unwrap();
             gctx.ws_roots
@@ -158,22 +159,34 @@ fn read_toml_string(path: &Path, is_embedded: bool, gctx: &GlobalContext) -> Car
         if !gctx.cli_unstable().script {
             anyhow::bail!("parsing `{}` requires `-Zscript`", path.display());
         }
-        contents = embedded::expand_manifest(&contents, path, gctx)?;
+        contents = embedded::expand_manifest(&contents)?;
     }
     Ok(contents)
 }
 
 #[tracing::instrument(skip_all)]
-fn parse_document(contents: &str) -> Result<toml_edit::ImDocument<String>, toml_edit::de::Error> {
-    toml_edit::ImDocument::parse(contents.to_owned()).map_err(Into::into)
+fn parse_document(
+    contents: &str,
+) -> Result<toml::Spanned<toml::de::DeTable<'static>>, toml::de::Error> {
+    let mut table = toml::de::DeTable::parse(contents)?;
+    table.get_mut().make_owned();
+    // SAFETY: `DeTable::make_owned` ensures no borrows remain and the lifetime does not affect
+    // layout
+    let table = unsafe {
+        std::mem::transmute::<
+            toml::Spanned<toml::de::DeTable<'_>>,
+            toml::Spanned<toml::de::DeTable<'static>>,
+        >(table)
+    };
+    Ok(table)
 }
 
 #[tracing::instrument(skip_all)]
 fn deserialize_toml(
-    document: &toml_edit::ImDocument<String>,
-) -> Result<manifest::TomlManifest, toml_edit::de::Error> {
+    document: &toml::Spanned<toml::de::DeTable<'static>>,
+) -> Result<manifest::TomlManifest, toml::de::Error> {
     let mut unused = BTreeSet::new();
-    let deserializer = toml_edit::de::Deserializer::from(document.clone());
+    let deserializer = toml::de::Deserializer::from(document.clone());
     let mut document: manifest::TomlManifest = serde_ignored::deserialize(deserializer, |path| {
         let mut key = String::new();
         stringify(&mut key, &path);
@@ -211,9 +224,14 @@ fn stringify(dst: &mut String, path: &serde_ignored::Path<'_>) {
 fn to_workspace_config(
     original_toml: &manifest::TomlManifest,
     manifest_file: &Path,
+    is_embedded: bool,
     gctx: &GlobalContext,
     warnings: &mut Vec<String>,
 ) -> CargoResult<WorkspaceConfig> {
+    if is_embedded {
+        let ws_root_config = to_workspace_root_config(&TomlWorkspace::default(), manifest_file);
+        return Ok(WorkspaceConfig::Root(ws_root_config));
+    }
     let workspace_config = match (
         original_toml.workspace.as_ref(),
         original_toml.package().and_then(|p| p.workspace.as_ref()),
@@ -309,6 +327,7 @@ fn normalize_toml(
         build_dependencies2: None,
         target: None,
         lints: None,
+        hints: None,
         workspace: original_toml.workspace.clone().or_else(|| {
             // Prevent looking for a workspace by `read_manifest_from_str`
             is_embedded.then(manifest::TomlWorkspace::default)
@@ -337,6 +356,7 @@ fn normalize_toml(
             is_embedded,
             gctx,
             &inherit,
+            features,
         )?;
         let package_name = &normalized_package
             .normalized_name()
@@ -361,8 +381,37 @@ fn normalize_toml(
             original_package.autolib.or(auto_embedded),
             warnings,
         )?;
+        let original_toml_bin = if is_embedded {
+            let manifest_file_stem = manifest_file
+                .file_stem()
+                .expect("file name enforced previously");
+            let name = embedded::sanitize_name(manifest_file_stem.to_string_lossy().as_ref());
+            let manifest_file_name = manifest_file
+                .file_name()
+                .expect("file name enforced previously");
+            let path = PathBuf::from(manifest_file_name);
+            Cow::Owned(Some(vec![manifest::TomlBinTarget {
+                name: Some(name),
+                crate_type: None,
+                crate_type2: None,
+                path: Some(manifest::PathValue(path)),
+                filename: None,
+                test: None,
+                doctest: None,
+                bench: None,
+                doc: None,
+                doc_scrape_examples: None,
+                proc_macro: None,
+                proc_macro2: None,
+                harness: None,
+                required_features: None,
+                edition: None,
+            }]))
+        } else {
+            Cow::Borrowed(&original_toml.bin)
+        };
         normalized_toml.bin = Some(targets::normalize_bins(
-            original_toml.bin.as_ref(),
+            original_toml_bin.as_ref().as_ref(),
             package_root,
             package_name,
             edition,
@@ -523,6 +572,8 @@ fn normalize_toml(
             lints,
         });
 
+        normalized_toml.hints = original_toml.hints.clone();
+
         normalized_toml.badges = original_toml.badges.clone();
     } else {
         if let Some(field) = original_toml.requires_package().next() {
@@ -571,6 +622,7 @@ fn normalize_package_toml<'a>(
     is_embedded: bool,
     gctx: &GlobalContext,
     inherit: &dyn Fn() -> CargoResult<&'a InheritableFields>,
+    features: &Features,
 ) -> CargoResult<Box<manifest::TomlPackage>> {
     let package_root = manifest_file.parent().unwrap();
 
@@ -634,9 +686,12 @@ fn normalize_package_toml<'a>(
         .transpose()?
         .map(manifest::InheritableField::Value);
     let build = if is_embedded {
-        Some(StringOrBool::Bool(false))
+        Some(TomlPackageBuild::Auto(false))
     } else {
-        targets::normalize_build(original_package.build.as_ref(), package_root)
+        if let Some(TomlPackageBuild::MultipleScript(_)) = original_package.build {
+            features.require(Feature::multiple_build_scripts())?;
+        }
+        targets::normalize_build(original_package.build.as_ref(), package_root)?
     };
     let metabuild = original_package.metabuild.clone();
     let default_target = original_package.default_target.clone();
@@ -915,7 +970,7 @@ fn load_inheritable_fields(
     match workspace_config {
         WorkspaceConfig::Root(root) => Ok(root.inheritable().clone()),
         WorkspaceConfig::Member {
-            root: Some(ref path_to_root),
+            root: Some(path_to_root),
         } => {
             let path = normalized_path
                 .parent()
@@ -1092,11 +1147,13 @@ fn lints_inherit_with(
 ) -> CargoResult<manifest::TomlLints> {
     if lints.workspace {
         if !lints.lints.is_empty() {
-            anyhow::bail!("cannot override `workspace.lints` in `lints`, either remove the overrides or `lints.workspace = true` and manually specify the lints");
+            anyhow::bail!(
+                "cannot override `workspace.lints` in `lints`, either remove the overrides or `lints.workspace = true` and manually specify the lints"
+            );
         }
-        get_ws_inheritable().with_context(|| {
-            "error inheriting `lints` from workspace root manifest's `workspace.lints`"
-        })
+        get_ws_inheritable().with_context(
+            || "error inheriting `lints` from workspace root manifest's `workspace.lints`",
+        )
     } else {
         Ok(lints.lints)
     }
@@ -1213,7 +1270,7 @@ fn deprecated_ws_default_features(
 #[tracing::instrument(skip_all)]
 pub fn to_real_manifest(
     contents: String,
-    document: toml_edit::ImDocument<String>,
+    document: toml::Spanned<toml::de::DeTable<'static>>,
     original_toml: manifest::TomlManifest,
     normalized_toml: manifest::TomlManifest,
     features: Features,
@@ -1306,18 +1363,8 @@ pub fn to_real_manifest(
         }
         default_edition
     };
-    // Add these lines if start a new unstable edition.
-    // ```
-    // if edition == Edition::Edition20xx {
-    //     features.require(Feature::edition20xx())?;
-    // }
-    // ```
     if !edition.is_stable() {
-        // Guard in case someone forgets to add .require()
-        return Err(util::errors::internal(format!(
-            "edition {} should be gated",
-            edition
-        )));
+        features.require(Feature::unstable_editions())?;
     }
 
     if original_toml.project.is_some() {
@@ -1338,10 +1385,7 @@ pub fn to_real_manifest(
         let invalid_fields = [
             ("`workspace`", original_toml.workspace.is_some()),
             ("`lib`", original_toml.lib.is_some()),
-            (
-                "`bin`",
-                original_toml.bin.as_ref().map(|b| b.len()).unwrap_or(0) != 1,
-            ),
+            ("`bin`", original_toml.bin.is_some()),
             ("`example`", original_toml.example.is_some()),
             ("`test`", original_toml.test.is_some()),
             ("`bench`", original_toml.bench.is_some()),
@@ -1459,7 +1503,7 @@ pub fn to_real_manifest(
                 warnings.push(format!(
                     "file `{}` found to be present in multiple \
                  build targets:\n{}",
-                    target_path.display().to_string(),
+                    target_path.display(),
                     conflicts
                         .iter()
                         .map(|t| format!("  * `{}` target `{}`", t.kind().description(), t.name(),))
@@ -1470,7 +1514,9 @@ pub fn to_real_manifest(
 
     if let Some(links) = &normalized_package.links {
         if !targets.iter().any(|t| t.is_custom_build()) {
-            bail!("package specifies that it links to `{links}` but does not have a custom build script")
+            bail!(
+                "package specifies that it links to `{links}` but does not have a custom build script"
+            )
         }
     }
 
@@ -1585,6 +1631,8 @@ pub fn to_real_manifest(
             .unwrap_or(&default),
     )?;
 
+    let hints = normalized_toml.hints.clone();
+
     let metadata = ManifestMetadata {
         description: normalized_package
             .normalized_description()
@@ -1646,7 +1694,7 @@ pub fn to_real_manifest(
         .normalized_publish()
         .expect("previously normalized")
     {
-        Some(manifest::VecStringOrBool::VecString(ref vecstring)) => Some(vecstring.clone()),
+        Some(manifest::VecStringOrBool::VecString(vecstring)) => Some(vecstring.clone()),
         Some(manifest::VecStringOrBool::Bool(false)) => Some(vec![]),
         Some(manifest::VecStringOrBool::Bool(true)) => None,
         None => version.is_none().then_some(vec![]),
@@ -1674,7 +1722,7 @@ pub fn to_real_manifest(
                 .iter()
                 .map(|(k, v)| {
                     (
-                        InternedString::new(k),
+                        k.to_string().into(),
                         v.iter().map(InternedString::from).collect(),
                     )
                 })
@@ -1776,6 +1824,7 @@ pub fn to_real_manifest(
         metabuild,
         resolve_behavior,
         rustflags,
+        hints,
         is_embedded,
     );
     if manifest
@@ -1811,7 +1860,7 @@ pub fn to_real_manifest(
 fn missing_dep_diagnostic(
     missing_dep: &MissingDependencyError,
     orig_toml: &TomlManifest,
-    document: &ImDocument<String>,
+    document: &toml::Spanned<toml::de::DeTable<'static>>,
     contents: &str,
     manifest_file: &Path,
     gctx: &GlobalContext,
@@ -1889,7 +1938,7 @@ fn missing_dep_diagnostic(
 
 fn to_virtual_manifest(
     contents: String,
-    document: toml_edit::ImDocument<String>,
+    document: toml::Spanned<toml::de::DeTable<'static>>,
     original_toml: manifest::TomlManifest,
     normalized_toml: manifest::TomlManifest,
     features: Features,
@@ -1963,7 +2012,7 @@ fn validate_dependencies(
             None => "dependencies",
         };
         let table_in_toml = if let Some(platform) = platform {
-            format!("target.{}.{kind_name}", platform.to_string())
+            format!("target.{platform}.{kind_name}")
         } else {
             kind_name.to_string()
         };
@@ -2458,25 +2507,15 @@ pub fn validate_profile(
     features: &Features,
     warnings: &mut Vec<String>,
 ) -> CargoResult<()> {
-    validate_profile_layer(root, name, cli_unstable, features)?;
+    validate_profile_layer(root, cli_unstable, features)?;
     if let Some(ref profile) = root.build_override {
         validate_profile_override(profile, "build-override")?;
-        validate_profile_layer(
-            profile,
-            &format!("{name}.build-override"),
-            cli_unstable,
-            features,
-        )?;
+        validate_profile_layer(profile, cli_unstable, features)?;
     }
     if let Some(ref packages) = root.package {
-        for (override_name, profile) in packages {
+        for profile in packages.values() {
             validate_profile_override(profile, "package")?;
-            validate_profile_layer(
-                profile,
-                &format!("{name}.package.{override_name}"),
-                cli_unstable,
-                features,
-            )?;
+            validate_profile_layer(profile, cli_unstable, features)?;
         }
     }
 
@@ -2541,25 +2580,16 @@ pub fn validate_profile(
 /// This is a shallow check, which is reused for the profile itself and any overrides.
 fn validate_profile_layer(
     profile: &manifest::TomlProfile,
-    name: &str,
     cli_unstable: &CliUnstable,
     features: &Features,
 ) -> CargoResult<()> {
-    if let Some(codegen_backend) = &profile.codegen_backend {
+    if profile.codegen_backend.is_some() {
         match (
             features.require(Feature::codegen_backend()),
             cli_unstable.codegen_backend,
         ) {
             (Err(e), false) => return Err(e),
             _ => {}
-        }
-
-        if codegen_backend.contains(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
-            bail!(
-                "`profile.{}.codegen-backend` setting of `{}` is not a valid backend name.",
-                name,
-                codegen_backend,
-            );
         }
     }
     if profile.rustflags.is_some() {
@@ -2748,7 +2778,7 @@ fn lints_to_rustflags(lints: &manifest::TomlLints) -> CargoResult<Vec<String>> {
 }
 
 fn emit_diagnostic(
-    e: toml_edit::de::Error,
+    e: toml::de::Error,
     contents: &str,
     manifest_file: &Path,
     gctx: &GlobalContext,
@@ -2786,7 +2816,9 @@ fn deprecated_underscore<T>(
 ) -> CargoResult<()> {
     let old_path = new_path.replace("-", "_");
     if old.is_some() && Edition::Edition2024 <= edition {
-        anyhow::bail!("`{old_path}` is unsupported as of the 2024 edition; instead use `{new_path}`\n(in the `{name}` {kind})");
+        anyhow::bail!(
+            "`{old_path}` is unsupported as of the 2024 edition; instead use `{new_path}`\n(in the `{name}` {kind})"
+        );
     } else if old.is_some() && new.is_some() {
         warnings.push(format!(
             "`{old_path}` is redundant with `{new_path}`, preferring `{new_path}` in the `{name}` {kind}"
@@ -2881,24 +2913,32 @@ fn prepare_toml_for_publish(
 
     let mut package = me.package().unwrap().clone();
     package.workspace = None;
-    if let Some(StringOrBool::String(path)) = &package.build {
-        let path = Path::new(path).to_path_buf();
-        let included = packaged_files.map(|i| i.contains(&path)).unwrap_or(true);
-        let build = if included {
-            let path = path
-                .into_os_string()
-                .into_string()
-                .map_err(|_err| anyhow::format_err!("non-UTF8 `package.build`"))?;
-            let path = normalize_path_string_sep(path);
-            StringOrBool::String(path)
-        } else {
-            ws.gctx().shell().warn(format!(
-                "ignoring `package.build` as `{}` is not included in the published package",
-                path.display()
-            ))?;
-            StringOrBool::Bool(false)
-        };
-        package.build = Some(build);
+    // Validates if build script file is included in package. If not, warn and ignore.
+    if let Some(custom_build_scripts) = package.normalized_build().expect("previously normalized") {
+        let mut included_scripts = Vec::new();
+        for script in custom_build_scripts {
+            let path = Path::new(script).to_path_buf();
+            let included = packaged_files.map(|i| i.contains(&path)).unwrap_or(true);
+            if included {
+                let path = path
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_err| anyhow::format_err!("non-UTF8 `package.build`"))?;
+                let path = normalize_path_string_sep(path);
+                included_scripts.push(path);
+            } else {
+                ws.gctx().shell().warn(format!(
+                    "ignoring `package.build` entry `{}` as it is not included in the published package",
+                    path.display()
+                ))?;
+            }
+        }
+
+        package.build = Some(match included_scripts.len() {
+            0 => TomlPackageBuild::Auto(false),
+            1 => TomlPackageBuild::SingleScript(included_scripts[0].clone()),
+            _ => TomlPackageBuild::MultipleScript(included_scripts),
+        });
     }
     let current_resolver = package
         .resolver
@@ -3046,6 +3086,7 @@ fn prepare_toml_for_publish(
             None => None,
         },
         lints: me.lints.clone(),
+        hints: me.hints.clone(),
         workspace: None,
         profile: me.profile.clone(),
         patch: None,
@@ -3086,7 +3127,7 @@ fn prepare_toml_for_publish(
 
         features.values_mut().for_each(|feature_deps| {
             feature_deps.retain(|feature_dep| {
-                let feature_value = FeatureValue::new(InternedString::new(feature_dep));
+                let feature_value = FeatureValue::new(feature_dep.into());
                 match feature_value {
                     FeatureValue::Dep { dep_name } | FeatureValue::DepFeature { dep_name, .. } => {
                         let k = &manifest::PackageName::new(dep_name.to_string()).unwrap();

@@ -5,17 +5,16 @@ use std::io::prelude::*;
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::str;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
+use crate::prelude::*;
 use cargo_test_support::git::{add_submodule, cargo_uses_gitoxide};
 use cargo_test_support::paths;
-use cargo_test_support::prelude::IntoData;
-use cargo_test_support::prelude::*;
 use cargo_test_support::registry::Package;
+use cargo_test_support::{Project, sleep_ms, str, t};
 use cargo_test_support::{basic_lib_manifest, basic_manifest, git, main_file, project};
-use cargo_test_support::{sleep_ms, str, t, Project};
 
 #[cargo_test]
 fn cargo_compile_simple_git_dep() {
@@ -1278,8 +1277,7 @@ fn unused_ambiguous_published_deps() {
     p.cargo("build").run();
     p.cargo("run")
         .with_stderr_data(str![[r#"
-[ERROR] invalid table header
-expected `.`, `]`
+[ERROR] unclosed table, expected `]`
  --> ../home/.cargo/git/checkouts/dep-[HASH]/[..]/invalid/Cargo.toml:2:29
   |
 2 |                     [package
@@ -1475,7 +1473,7 @@ fn dep_with_changed_submodule() {
     });
 
     let repo = git2::Repository::open(&git_project.root()).unwrap();
-    let mut sub = git::add_submodule(&repo, &git_project2.url().to_string(), Path::new("src"));
+    let mut sub = git::add_submodule(&repo, git_project2.url().as_ref(), Path::new("src"));
     git::commit(&repo);
 
     let p = project
@@ -1537,7 +1535,7 @@ project2
             .remote_add_fetch("origin", "refs/heads/*:refs/heads/*")
             .unwrap();
         subrepo
-            .remote_set_url("origin", &git_project3.url().to_string())
+            .remote_set_url("origin", git_project3.url().as_ref())
             .unwrap();
         let mut origin = subrepo.find_remote("origin").unwrap();
         origin.fetch(&Vec::<String>::new(), None, None).unwrap();
@@ -2810,11 +2808,11 @@ fn invalid_git_dependency_manifest() {
         .with_status(101)
         .with_stderr_data(str![[r#"
 [UPDATING] git repository `[ROOTURL]/dep1`
-[ERROR] duplicate key `categories` in table `package`
+[ERROR] duplicate key
  --> ../home/.cargo/git/checkouts/dep1-[HASH]/[..]/Cargo.toml:9:21
   |
 9 |                     categories = ["algorithms"]
-  |                     ^
+  |                     ^^^^^^^^^^
   |
 [ERROR] failed to get `dep1` as a dependency of package `foo v0.5.0 ([ROOT]/foo)`
 

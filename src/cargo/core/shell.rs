@@ -1,6 +1,6 @@
 use std::fmt;
-use std::io::prelude::*;
 use std::io::IsTerminal;
+use std::io::prelude::*;
 
 use annotate_snippets::{Message, Renderer};
 use anstream::AutoStream;
@@ -400,7 +400,7 @@ impl Shell {
 
     pub fn print_json<T: serde::ser::Serialize>(&mut self, obj: &T) -> CargoResult<()> {
         // Path may fail to serialize to JSON ...
-        let encoded = serde_json::to_string(&obj)?;
+        let encoded = serde_json::to_string(obj)?;
         // ... but don't fail due to a closed pipe.
         drop(writeln!(self.out(), "{}", encoded));
         Ok(())
@@ -655,7 +655,6 @@ mod imp {
 mod imp {
     use std::{cmp, mem, ptr};
 
-    use windows_sys::core::PCSTR;
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
@@ -663,10 +662,11 @@ mod imp {
         CreateFileA, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows_sys::Win32::System::Console::{
-        GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO, STD_ERROR_HANDLE,
+        CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_ERROR_HANDLE,
     };
+    use windows_sys::core::PCSTR;
 
-    pub(super) use super::{default_err_erase_line as err_erase_line, TtyWidth};
+    pub(super) use super::{TtyWidth, default_err_erase_line as err_erase_line};
 
     pub fn stderr_width() -> TtyWidth {
         unsafe {

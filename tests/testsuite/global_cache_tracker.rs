@@ -14,17 +14,17 @@ use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
+use crate::prelude::*;
+use crate::utils::cargo_process;
+use cargo::GlobalContext;
 use cargo::core::global_cache_tracker::{self, DeferredGlobalLastUse, GlobalCacheTracker};
 use cargo::util::cache_lock::CacheLockMode;
-use cargo::util::interning::InternedString;
-use cargo::GlobalContext;
 use cargo_test_support::compare::assert_e2e;
 use cargo_test_support::paths;
-use cargo_test_support::prelude::*;
 use cargo_test_support::registry::{Package, RegistryBuilder};
 use cargo_test_support::{
-    basic_manifest, cargo_process, execs, git, process, project, retry, sleep_ms, str,
-    thread_wait_timeout, Execs, Project,
+    Execs, Project, basic_manifest, execs, git, process, project, retry, sleep_ms, str,
+    thread_wait_timeout,
 };
 use itertools::Itertools;
 
@@ -137,7 +137,7 @@ fn populate_cache(
         .join(".cargo/registry/index/example.com-a6c4a5adcb232b9a")
         .mkdir_p();
     let mut create = |name: &str, age, crate_size: u64, src_size: u64| {
-        let crate_filename = InternedString::new(&format!("{name}.crate"));
+        let crate_filename = format!("{name}.crate").into();
         deferred.mark_registry_crate_used_stamp(
             global_cache_tracker::RegistryCrate {
                 encoded_registry_name: "example.com-a6c4a5adcb232b9a".into(),
@@ -1987,11 +1987,9 @@ fn compatible_with_older_cargo() {
             middle = "1.0"
         "#,
     );
-    // TODO: Remove -Zgc after 1.82 is stabilized.
     rustup_cargo()
-        .args(&["+stable", "check", "-Zgc"])
+        .args(&["+stable", "check"])
         .cwd(p.root())
-        .masquerade_as_nightly_cargo(&["gc"])
         .env("__CARGO_TEST_LAST_USE_NOW", months_ago_unix(2))
         .run();
     assert_eq!(get_registry_names("src"), ["middle-1.0.0", "new-1.0.0"]);

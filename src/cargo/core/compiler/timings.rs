@@ -3,9 +3,9 @@
 //! This module implements some simple tracking information for timing of how
 //! long it takes for different units to compile.
 use super::{CompileMode, Unit};
+use crate::core::PackageId;
 use crate::core::compiler::job_queue::JobId;
 use crate::core::compiler::{BuildContext, BuildRunner, TimingOutput};
-use crate::core::PackageId;
 use crate::util::cpu::State;
 use crate::util::machine_message::{self, Message};
 use crate::util::style;
@@ -168,7 +168,6 @@ impl<'gctx> Timings<'gctx> {
             CompileMode::Build => {}
             CompileMode::Check { test: true } => target.push_str(" (check-test)"),
             CompileMode::Check { test: false } => target.push_str(" (check)"),
-            CompileMode::Bench => target.push_str(" (bench)"),
             CompileMode::Doc { .. } => target.push_str(" (doc)"),
             CompileMode::Doctest => target.push_str(" (doc test)"),
             CompileMode::Docscrape => target.push_str(" (doc scrape)"),

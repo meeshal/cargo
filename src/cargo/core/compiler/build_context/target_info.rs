@@ -15,7 +15,7 @@ use crate::util::interning::InternedString;
 use crate::util::{CargoResult, Rustc};
 use anyhow::Context as _;
 use cargo_platform::{Cfg, CfgExpr};
-use cargo_util::{paths, ProcessBuilder};
+use cargo_util::{ProcessBuilder, paths};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::hash_map::{Entry, HashMap};
@@ -214,9 +214,9 @@ impl TargetInfo {
 
             let (output, error) = rustc
                 .cached_output(&process, extra_fingerprint)
-                .with_context(|| {
-                    "failed to run `rustc` to learn about target-specific information"
-                })?;
+                .with_context(
+                    || "failed to run `rustc` to learn about target-specific information",
+                )?;
 
             let mut lines = output.lines();
             let mut map = HashMap::new();
@@ -254,7 +254,7 @@ impl TargetInfo {
                                 &process,
                                 &output,
                                 &error,
-                            )
+                            );
                         }
                     }
                 }
@@ -570,10 +570,11 @@ impl TargetInfo {
         mode: CompileMode,
         target_kind: &TargetKind,
         target_triple: &str,
+        gctx: &GlobalContext,
     ) -> CargoResult<(Vec<FileType>, Vec<CrateType>)> {
         match mode {
-            CompileMode::Build => self.calc_rustc_outputs(target_kind, target_triple),
-            CompileMode::Test | CompileMode::Bench => {
+            CompileMode::Build => self.calc_rustc_outputs(target_kind, target_triple, gctx),
+            CompileMode::Test => {
                 match self.file_types(&CrateType::Bin, FileFlavor::Normal, target_triple)? {
                     Some(fts) => Ok((fts, Vec::new())),
                     None => Ok((Vec::new(), vec![CrateType::Bin])),
@@ -593,6 +594,7 @@ impl TargetInfo {
         &self,
         target_kind: &TargetKind,
         target_triple: &str,
+        gctx: &GlobalContext,
     ) -> CargoResult<(Vec<FileType>, Vec<CrateType>)> {
         let mut unsupported = Vec::new();
         let mut result = Vec::new();
@@ -613,9 +615,18 @@ impl TargetInfo {
                 }
             }
         }
-        if !result.is_empty() && !crate_types.iter().any(|ct| ct.requires_upstream_objects()) {
-            // Only add rmeta if pipelining.
-            result.push(FileType::new_rmeta());
+        if !result.is_empty() {
+            if gctx.cli_unstable().no_embed_metadata
+                && crate_types
+                    .iter()
+                    .any(|ct| ct.benefits_from_no_embed_metadata())
+            {
+                // Add .rmeta when we apply -Zembed-metadata=no to the unit.
+                result.push(FileType::new_rmeta());
+            } else if !crate_types.iter().any(|ct| ct.requires_upstream_objects()) {
+                // Only add rmeta if pipelining
+                result.push(FileType::new_rmeta());
+            }
         }
         Ok((result, unsupported))
     }

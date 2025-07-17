@@ -8,9 +8,9 @@ use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 static CARGO_INTEGRATION_TEST_DIR: &str = "cit";
 
@@ -66,7 +66,7 @@ pub fn global_root() -> PathBuf {
 // [*] It does set the thread name, but only when running concurrently. If not
 // running concurrently, all tests are run on the main thread.
 thread_local! {
-    static TEST_ID: RefCell<Option<usize>> = RefCell::new(None);
+    static TEST_ID: RefCell<Option<usize>> = const { RefCell::new(None) };
 }
 
 /// See [`init_root`]

@@ -69,6 +69,7 @@ use anyhow::{Context as _, Error};
 use lazycell::LazyCell;
 use tracing::{debug, instrument, trace};
 
+pub use self::build_config::UserIntent;
 pub use self::build_config::{BuildConfig, CompileMode, MessageFormat, TimingOutput};
 pub use self::build_context::{
     BuildContext, FileFlavor, FileType, RustDocFingerprint, RustcTargetData, TargetInfo,
@@ -98,7 +99,7 @@ use crate::util::errors::{CargoResult, VerboseError};
 use crate::util::interning::InternedString;
 use crate::util::machine_message::{self, Message};
 use crate::util::{add_path_args, internal};
-use cargo_util::{paths, ProcessBuilder, ProcessError};
+use cargo_util::{ProcessBuilder, ProcessError, paths};
 use cargo_util_schemas::manifest::TomlDebugInfo;
 use cargo_util_schemas::manifest::TomlTrimPaths;
 use cargo_util_schemas::manifest::TomlTrimPathsValue;
@@ -179,50 +180,55 @@ fn compile<'gctx>(
         return Ok(());
     }
 
-    // Build up the work to be done to compile this unit, enqueuing it once
-    // we've got everything constructed.
-    fingerprint::prepare_init(build_runner, unit)?;
+    // If we are in `--compile-time-deps` and the given unit is not a compile time
+    // dependency, skip compling the unit and jumps to dependencies, which still
+    // have chances to be compile time dependencies
+    if !unit.skip_non_compile_time_dep {
+        // Build up the work to be done to compile this unit, enqueuing it once
+        // we've got everything constructed.
+        fingerprint::prepare_init(build_runner, unit)?;
 
-    let job = if unit.mode.is_run_custom_build() {
-        custom_build::prepare(build_runner, unit)?
-    } else if unit.mode.is_doc_test() {
-        // We run these targets later, so this is just a no-op for now.
-        Job::new_fresh()
-    } else if build_plan {
-        Job::new_dirty(
-            rustc(build_runner, unit, &exec.clone())?,
-            DirtyReason::FreshBuild,
-        )
-    } else {
-        let force = exec.force_rebuild(unit) || force_rebuild;
-        let mut job = fingerprint::prepare_target(build_runner, unit, force)?;
-        job.before(if job.freshness().is_dirty() {
-            let work = if unit.mode.is_doc() || unit.mode.is_doc_scrape() {
-                rustdoc(build_runner, unit)?
-            } else {
-                rustc(build_runner, unit, exec)?
-            };
-            work.then(link_targets(build_runner, unit, false)?)
+        let job = if unit.mode.is_run_custom_build() {
+            custom_build::prepare(build_runner, unit)?
+        } else if unit.mode.is_doc_test() {
+            // We run these targets later, so this is just a no-op for now.
+            Job::new_fresh()
+        } else if build_plan {
+            Job::new_dirty(
+                rustc(build_runner, unit, &exec.clone())?,
+                DirtyReason::FreshBuild,
+            )
         } else {
-            // We always replay the output cache,
-            // since it might contain future-incompat-report messages
-            let show_diagnostics = unit.show_warnings(bcx.gctx)
-                && build_runner.bcx.gctx.warning_handling()? != WarningHandling::Allow;
-            let work = replay_output_cache(
-                unit.pkg.package_id(),
-                PathBuf::from(unit.pkg.manifest_path()),
-                &unit.target,
-                build_runner.files().message_cache_path(unit),
-                build_runner.bcx.build_config.message_format,
-                show_diagnostics,
-            );
-            // Need to link targets on both the dirty and fresh.
-            work.then(link_targets(build_runner, unit, true)?)
-        });
+            let force = exec.force_rebuild(unit) || force_rebuild;
+            let mut job = fingerprint::prepare_target(build_runner, unit, force)?;
+            job.before(if job.freshness().is_dirty() {
+                let work = if unit.mode.is_doc() || unit.mode.is_doc_scrape() {
+                    rustdoc(build_runner, unit)?
+                } else {
+                    rustc(build_runner, unit, exec)?
+                };
+                work.then(link_targets(build_runner, unit, false)?)
+            } else {
+                // We always replay the output cache,
+                // since it might contain future-incompat-report messages
+                let show_diagnostics = unit.show_warnings(bcx.gctx)
+                    && build_runner.bcx.gctx.warning_handling()? != WarningHandling::Allow;
+                let work = replay_output_cache(
+                    unit.pkg.package_id(),
+                    PathBuf::from(unit.pkg.manifest_path()),
+                    &unit.target,
+                    build_runner.files().message_cache_path(unit),
+                    build_runner.bcx.build_config.message_format,
+                    show_diagnostics,
+                );
+                // Need to link targets on both the dirty and fresh.
+                work.then(link_targets(build_runner, unit, true)?)
+            });
 
-        job
-    };
-    jobs.enqueue(build_runner, unit, job)?;
+            job
+        };
+        jobs.enqueue(build_runner, unit, job)?;
+    }
 
     // Be sure to compile all dependencies of this target as well.
     let deps = Vec::from(build_runner.unit_deps(unit)); // Create vec due to mutable borrow.
@@ -307,7 +313,7 @@ fn rustc(
         .unwrap_or_else(|| build_runner.bcx.gctx.cwd())
         .to_path_buf();
     let fingerprint_dir = build_runner.files().fingerprint_dir(unit);
-    let script_metadata = build_runner.find_build_script_metadata(unit);
+    let script_metadatas = build_runner.find_build_script_metadatas(unit);
     let is_local = unit.is_local();
     let artifact = unit.artifact;
     let sbom_files = build_runner.sbom_output_files(unit)?;
@@ -365,7 +371,7 @@ fn rustc(
                 )?;
                 add_plugin_deps(&mut rustc, &script_outputs, &build_scripts, &root_output)?;
             }
-            add_custom_flags(&mut rustc, &script_outputs, script_metadata)?;
+            add_custom_flags(&mut rustc, &script_outputs, script_metadatas)?;
         }
 
         for output in outputs.iter() {
@@ -735,6 +741,15 @@ fn prepare_rustc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResult
         .compilation
         .rustc_process(unit, is_primary, is_workspace)?;
     build_base_args(build_runner, &mut base, unit)?;
+    if unit.pkg.manifest().is_embedded() {
+        if !gctx.cli_unstable().script {
+            anyhow::bail!(
+                "parsing `{}` requires `-Zscript`",
+                unit.pkg.manifest_path().display()
+            );
+        }
+        base.arg("-Z").arg("crate-attr=feature(frontmatter)");
+    }
 
     base.inherit_jobserver(&build_runner.jobserver);
     build_deps_args(&mut base, build_runner, unit)?;
@@ -774,6 +789,15 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
     let bcx = build_runner.bcx;
     // script_metadata is not needed here, it is only for tests.
     let mut rustdoc = build_runner.compilation.rustdoc_process(unit, None)?;
+    if unit.pkg.manifest().is_embedded() {
+        if !bcx.gctx.cli_unstable().script {
+            anyhow::bail!(
+                "parsing `{}` requires `-Zscript`",
+                unit.pkg.manifest_path().display()
+            );
+        }
+        rustdoc.arg("-Z").arg("crate-attr=feature(frontmatter)");
+    }
     rustdoc.inherit_jobserver(&build_runner.jobserver);
     let crate_name = unit.target.crate_name();
     rustdoc.arg("--crate-name").arg(&crate_name);
@@ -792,8 +816,10 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
     add_allow_features(build_runner, &mut rustdoc);
 
     if build_runner.bcx.gctx.cli_unstable().rustdoc_depinfo {
+        // toolchain-shared-resources is required for keeping the shared styling resources
         // invocation-specific is required for keeping the original rustdoc emission
-        let mut arg = OsString::from("--emit=invocation-specific,dep-info=");
+        let mut arg =
+            OsString::from("--emit=toolchain-shared-resources,invocation-specific,dep-info=");
         arg.push(rustdoc_dep_info_loc(build_runner, unit));
         rustdoc.arg(arg);
 
@@ -848,7 +874,7 @@ fn prepare_rustdoc(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
     build_deps_args(&mut rustdoc, build_runner, unit)?;
     rustdoc::add_root_urls(build_runner, unit, &mut rustdoc)?;
 
-    rustdoc::add_output_format(build_runner, unit, &mut rustdoc)?;
+    rustdoc::add_output_format(build_runner, &mut rustdoc)?;
 
     if let Some(args) = build_runner.bcx.extra_args_for(unit) {
         rustdoc.args(args);
@@ -894,7 +920,7 @@ fn rustdoc(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<W
     let rustdoc_depinfo_enabled = build_runner.bcx.gctx.cli_unstable().rustdoc_depinfo;
 
     let mut output_options = OutputOptions::new(build_runner, unit);
-    let script_metadata = build_runner.find_build_script_metadata(unit);
+    let script_metadatas = build_runner.find_build_script_metadatas(unit);
     let scrape_outputs = if should_include_scrape_units(build_runner.bcx, unit) {
         Some(
             build_runner
@@ -934,7 +960,7 @@ fn rustdoc(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<W
         add_custom_flags(
             &mut rustdoc,
             &build_script_outputs.lock().unwrap(),
-            script_metadata,
+            script_metadatas,
         )?;
 
         // Add the output of scraped examples to the rustdoc command.
@@ -1109,9 +1135,26 @@ fn build_base_args(
         strip,
         rustflags: profile_rustflags,
         trim_paths,
+        hint_mostly_unused: profile_hint_mostly_unused,
         ..
     } = unit.profile.clone();
+    let hints = unit.pkg.hints().cloned().unwrap_or_default();
     let test = unit.mode.is_any_test();
+
+    let warn = |msg: &str| {
+        bcx.gctx.shell().warn(format!(
+            "{}@{}: {msg}",
+            unit.pkg.package_id().name(),
+            unit.pkg.package_id().version()
+        ))
+    };
+    let unit_capped_warn = |msg: &str| {
+        if unit.show_warnings(bcx.gctx) {
+            warn(msg)
+        } else {
+            Ok(())
+        }
+    };
 
     cmd.arg("--crate-name").arg(&unit.target.crate_name());
 
@@ -1132,13 +1175,31 @@ fn build_base_args(
 
     if unit.mode.is_check() {
         cmd.arg("--emit=dep-info,metadata");
-    } else if !unit.requires_upstream_objects() {
-        // Always produce metadata files for rlib outputs. Metadata may be used
-        // in this session for a pipelined compilation, or it may be used in a
-        // future Cargo session as part of a pipelined compile.
-        cmd.arg("--emit=dep-info,metadata,link");
+    } else if build_runner.bcx.gctx.cli_unstable().no_embed_metadata {
+        // Nightly rustc supports the -Zembed-metadata=no flag, which tells it to avoid including
+        // full metadata in rlib/dylib artifacts, to save space on disk. In this case, metadata
+        // will only be stored in .rmeta files.
+        // When we use this flag, we should also pass --emit=metadata to all artifacts that
+        // contain useful metadata (rlib/dylib/proc macros), so that a .rmeta file is actually
+        // generated. If we didn't do this, the full metadata would not get written anywhere.
+        // However, we do not want to pass --emit=metadata to artifacts that never produce useful
+        // metadata, such as binaries, because that would just unnecessarily create empty .rmeta
+        // files on disk.
+        if unit.benefits_from_no_embed_metadata() {
+            cmd.arg("--emit=dep-info,metadata,link");
+            cmd.args(&["-Z", "embed-metadata=no"]);
+        } else {
+            cmd.arg("--emit=dep-info,link");
+        }
     } else {
-        cmd.arg("--emit=dep-info,link");
+        // If we don't use -Zembed-metadata=no, we emit .rmeta files only for rlib outputs.
+        // This metadata may be used in this session for a pipelined compilation, or it may
+        // be used in a future Cargo session as part of a pipelined compile.
+        if !unit.requires_upstream_objects() {
+            cmd.arg("--emit=dep-info,metadata,link");
+        } else {
+            cmd.arg("--emit=dep-info,link");
+        }
     }
 
     let prefer_dynamic = (unit.target.for_host() && !unit.target.is_custom_build())
@@ -1281,6 +1342,37 @@ fn build_base_args(
         opt(cmd, "-C", "incremental=", Some(dir));
     }
 
+    let pkg_hint_mostly_unused = match hints.mostly_unused {
+        None => None,
+        Some(toml::Value::Boolean(b)) => Some(b),
+        Some(v) => {
+            unit_capped_warn(&format!(
+                "ignoring unsupported value type ({}) for 'hints.mostly-unused', which expects a boolean",
+                v.type_str()
+            ))?;
+            None
+        }
+    };
+    if profile_hint_mostly_unused
+        .or(pkg_hint_mostly_unused)
+        .unwrap_or(false)
+    {
+        if bcx.gctx.cli_unstable().profile_hint_mostly_unused {
+            cmd.arg("-Zhint-mostly-unused");
+        } else {
+            if profile_hint_mostly_unused.is_some() {
+                // Profiles come from the top-level unit, so we don't use `unit_capped_warn` here.
+                warn(
+                    "ignoring 'hint-mostly-unused' profile option, pass `-Zprofile-hint-mostly-unused` to enable it",
+                )?;
+            } else if pkg_hint_mostly_unused.is_some() {
+                unit_capped_warn(
+                    "ignoring 'hints.mostly-unused', pass `-Zprofile-hint-mostly-unused` to enable it",
+                )?;
+            }
+        }
+    }
+
     let strip = strip.into_inner();
     if strip != StripInner::None {
         cmd.arg("-C").arg(format!("strip={}", strip));
@@ -1343,7 +1435,7 @@ fn trim_paths_args_rustdoc(
     match trim_paths {
         // rustdoc supports diagnostics trimming only.
         TomlTrimPaths::Values(values) if !values.contains(&TomlTrimPathsValue::Diagnostics) => {
-            return Ok(())
+            return Ok(());
         }
         _ => {}
     }
@@ -1354,6 +1446,7 @@ fn trim_paths_args_rustdoc(
     // Order of `--remap-path-prefix` flags is important for `-Zbuild-std`.
     // We want to show `/rustc/<hash>/library/std` instead of `std-0.0.0`.
     cmd.arg(package_remap(build_runner, unit));
+    cmd.arg(build_dir_remap(build_runner));
     cmd.arg(sysroot_remap(build_runner, unit));
 
     Ok(())
@@ -1381,6 +1474,7 @@ fn trim_paths_args(
     // Order of `--remap-path-prefix` flags is important for `-Zbuild-std`.
     // We want to show `/rustc/<hash>/library/std` instead of `std-0.0.0`.
     cmd.arg(package_remap(build_runner, unit));
+    cmd.arg(build_dir_remap(build_runner));
     cmd.arg(sysroot_remap(build_runner, unit));
 
     Ok(())
@@ -1451,6 +1545,26 @@ fn package_remap(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> OsString {
         remap.push("-");
         remap.push(unit.pkg.version().to_string());
     }
+    remap
+}
+
+/// Remap all paths pointing to `build.build-dir`,
+/// i.e., `[BUILD_DIR]/debug/deps/foo-[HASH].dwo` would be remapped to
+/// `/cargo/build-dir/debug/deps/foo-[HASH].dwo`
+/// (note the `/cargo/build-dir` prefix).
+///
+/// This covers scenarios like:
+///
+/// * Build script generated code. For example, a build script may call `file!`
+///   macros, and the associated crate uses [`include!`] to include the expanded
+///   [`file!`] macro in-place via the `OUT_DIR` environment.
+/// * On Linux, `DW_AT_GNU_dwo_name` that contains paths to split debuginfo
+///   files (dwp and dwo).
+fn build_dir_remap(build_runner: &BuildRunner<'_, '_>) -> OsString {
+    let build_dir = build_runner.bcx.ws.build_dir();
+    let mut remap = OsString::from("--remap-path-prefix=");
+    remap.push(build_dir.as_path_unlocked());
+    remap.push("=/cargo/build-dir");
     remap
 }
 
@@ -1609,18 +1723,20 @@ fn build_deps_args(
 fn add_custom_flags(
     cmd: &mut ProcessBuilder,
     build_script_outputs: &BuildScriptOutputs,
-    metadata: Option<UnitHash>,
+    metadata_vec: Option<Vec<UnitHash>>,
 ) -> CargoResult<()> {
-    if let Some(metadata) = metadata {
-        if let Some(output) = build_script_outputs.get(metadata) {
-            for cfg in output.cfgs.iter() {
-                cmd.arg("--cfg").arg(cfg);
-            }
-            for check_cfg in &output.check_cfgs {
-                cmd.arg("--check-cfg").arg(check_cfg);
-            }
-            for (name, value) in output.env.iter() {
-                cmd.env(name, value);
+    if let Some(metadata_vec) = metadata_vec {
+        for metadata in metadata_vec {
+            if let Some(output) = build_script_outputs.get(metadata) {
+                for cfg in output.cfgs.iter() {
+                    cmd.arg("--cfg").arg(cfg);
+                }
+                for check_cfg in &output.check_cfgs {
+                    cmd.arg("--check-cfg").arg(check_cfg);
+                }
+                for (name, value) in output.env.iter() {
+                    cmd.env(name, value);
+                }
             }
         }
     }
@@ -1636,6 +1752,8 @@ pub fn extern_args(
 ) -> CargoResult<Vec<OsString>> {
     let mut result = Vec::new();
     let deps = build_runner.unit_deps(unit);
+
+    let no_embed_metadata = build_runner.bcx.gctx.cli_unstable().no_embed_metadata;
 
     // Closure to add one dependency to `result`.
     let mut link_to =
@@ -1684,6 +1802,12 @@ pub fn extern_args(
                 // Example: a bin needs `rlib` for dependencies, it cannot use rmeta.
                 for output in outputs.iter() {
                     if output.flavor == FileFlavor::Linkable {
+                        pass(&output.path);
+                    }
+                    // If we use -Zembed-metadata=no, we also need to pass the path to the
+                    // corresponding .rmeta file to the linkable artifact, because the
+                    // normal dependency (rlib) doesn't contain the full metadata.
+                    else if no_embed_metadata && output.flavor == FileFlavor::Rmeta {
                         pass(&output.path);
                     }
                 }

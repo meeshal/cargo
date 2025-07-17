@@ -4,12 +4,12 @@ use std::io::Write;
 use crate::core::Shell;
 use crate::util::style::{ERROR, HEADER, LITERAL, NOP, NOTE, WARN};
 use crate::{
+    CargoResult, GlobalContext,
     core::{
-        dependency::DepKind, shell::Verbosity, Dependency, FeatureMap, Package, PackageId, SourceId,
+        Dependency, FeatureMap, Package, PackageId, SourceId, dependency::DepKind, shell::Verbosity,
     },
     sources::IndexSummary,
     util::interning::InternedString,
-    CargoResult, GlobalContext,
 };
 
 // Pretty print the package information.
@@ -135,7 +135,7 @@ pub(super) fn pretty_view(
         )?;
     }
 
-    let activated = &[InternedString::new("default")];
+    let activated = &["default".into()];
     let resolved_features = resolve_features(activated, summary.features());
     pretty_features(
         resolved_features.clone(),

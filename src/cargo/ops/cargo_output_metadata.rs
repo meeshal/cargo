@@ -2,11 +2,11 @@ use crate::core::compiler::artifact::match_artifacts_kind_with_targets;
 use crate::core::compiler::{CompileKind, CompileKindFallback, RustcTargetData};
 use crate::core::dependency::DepKind;
 use crate::core::package::SerializedPackage;
-use crate::core::resolver::{features::CliFeatures, HasDevUnits, Resolve};
+use crate::core::resolver::{HasDevUnits, Resolve, features::CliFeatures};
 use crate::core::{Package, PackageId, PackageIdSpec, Workspace};
 use crate::ops::{self, Packages};
-use crate::util::interning::InternedString;
 use crate::util::CargoResult;
+use crate::util::interning::InternedString;
 use cargo_platform::Platform;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -302,7 +302,7 @@ fn build_resolve_graph_r(
                         // Given that Cargo doesn't know which target it should resolve to,
                         // when an artifact dep is specified with { target = "target" },
                         // keep it with a special "<target>" string,
-                        .or_else(|| Some(InternedString::new("<target>"))),
+                        .or_else(|| Some("<target>".into())),
                     None => None,
                 };
 
@@ -334,7 +334,7 @@ fn build_resolve_graph_r(
                 },
                 // No lib target exists but contains artifact deps.
                 (None, 1..) => Dep {
-                    name: InternedString::new(""),
+                    name: "".into(),
                     pkg: pkg_id.to_spec(),
                     pkg_id,
                     dep_kinds,

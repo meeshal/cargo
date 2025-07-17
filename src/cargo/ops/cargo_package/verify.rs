@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
-use std::io::prelude::*;
 use std::io::SeekFrom;
+use std::io::prelude::*;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,19 +14,19 @@ use cargo_util::paths;
 use flate2::read::GzDecoder;
 use tar::Archive;
 
-use crate::core::compiler::BuildConfig;
-use crate::core::compiler::CompileMode;
-use crate::core::compiler::DefaultExecutor;
-use crate::core::compiler::Executor;
+use crate::CargoResult;
 use crate::core::Feature;
 use crate::core::Package;
 use crate::core::SourceId;
 use crate::core::Workspace;
+use crate::core::compiler::BuildConfig;
+use crate::core::compiler::DefaultExecutor;
+use crate::core::compiler::Executor;
+use crate::core::compiler::UserIntent;
 use crate::ops;
 use crate::sources::PathSource;
 use crate::util;
 use crate::util::FileLock;
-use crate::CargoResult;
 
 use super::PackageOpts;
 use super::TmpRegistry;
@@ -103,7 +103,7 @@ pub fn run_verify(
                 opts.jobs.clone(),
                 opts.keep_going,
                 &opts.targets,
-                CompileMode::Build,
+                UserIntent::Build,
             )?,
             cli_features: opts.cli_features.clone(),
             spec: ops::Packages::Packages(Vec::new()),

@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use crate::prelude::*;
+use crate::utils::cargo_process;
 use cargo::core::SourceId;
-use cargo_test_support::cargo_process;
 use cargo_test_support::paths;
-use cargo_test_support::prelude::*;
 use cargo_test_support::registry::{
-    self, registry_path, Dependency, Package, RegistryBuilder, Response, TestRegistry,
+    self, Dependency, Package, RegistryBuilder, Response, TestRegistry, registry_path,
 };
 use cargo_test_support::{basic_manifest, project, str};
 use cargo_test_support::{git, t};
@@ -3879,6 +3879,57 @@ fn dl_retry_multiple() {
     p.cargo("fetch")
         .with_stderr_data(IntoData::unordered(expected))
         .run();
+}
+
+#[cargo_test]
+fn retry_too_many_requests() {
+    let fail_count = Mutex::new(0);
+    let _registry = RegistryBuilder::new()
+        .http_index()
+        .add_responder("/index/3/b/bar", move |req, server| {
+            let mut fail_count = fail_count.lock().unwrap();
+            if *fail_count < 1 {
+                *fail_count += 1;
+                server.too_many_requests(req, std::time::Duration::from_secs(1))
+            } else {
+                server.index(req)
+            }
+        })
+        .build();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+
+                [dependencies]
+                bar = ">= 0.0.0"
+            "#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .build();
+
+    Package::new("bar", "0.0.1").publish();
+
+    p.cargo("check")
+    .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[WARNING] spurious network error (3 tries remaining): failed to get successful HTTP response from `[..]/index/3/b/bar` ([..]), got 429
+body:
+too many requests, try again in 1 seconds
+[LOCKING] 1 package to latest compatible version
+[DOWNLOADING] crates ...
+[DOWNLOADED] bar v0.0.1 (registry `dummy-registry`)
+[CHECKING] bar v0.0.1
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]).run();
 }
 
 #[cargo_test]

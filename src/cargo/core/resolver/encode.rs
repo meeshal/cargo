@@ -115,8 +115,8 @@ use super::{Resolve, ResolveVersion};
 use crate::core::{Dependency, GitReference, Package, PackageId, SourceId, Workspace};
 use crate::util::errors::CargoResult;
 use crate::util::interning::InternedString;
-use crate::util::{internal, Graph};
-use anyhow::{bail, Context as _};
+use crate::util::{Graph, internal};
+use anyhow::{Context as _, bail};
 use serde::de;
 use serde::ser;
 use serde::{Deserialize, Serialize};
@@ -698,7 +698,7 @@ impl ser::Serialize for Resolve {
                     None => "<none>",
                 };
                 let id = encodable_package_id(id, &state, self.version());
-                metadata.insert(format!("checksum {}", id.to_string()), checksum.to_string());
+                metadata.insert(format!("checksum {}", id), checksum.to_string());
             }
         }
 
